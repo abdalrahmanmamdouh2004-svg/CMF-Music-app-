@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- "Display over other apps": Android only lets this app open another app's screen (a podcast episode, a link,
+         an app) while it is in the background, which is where it is when the watch asks, if this is granted. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
         <package android:name="com.google.android.apps.youtube.music" />

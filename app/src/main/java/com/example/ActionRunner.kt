@@ -33,76 +33,100 @@ object ActionRunner {
             item.value.contains("youtube.com") || item.value.contains("youtu.be") || item.podcastCurrentUrl.contains("youtube.com") || item.podcastPlayerHint.contains("youtube.com") || item.podcastPlayerHint.contains("youtu.be") -> MediaMenuConfig.targetPackage(context).ifBlank { "com.google.android.apps.youtube.music" }
             else -> MediaMenuConfig.targetPackage(context)
         }
+        val episodes = PodcastFeed.decodeEpisodes(item.podcastEpisodes)
+        val current = episodes.getOrNull(item.podcastIndex)
+        val episodeUrl = item.podcastCurrentUrl.ifBlank { current?.let { it.link.ifBlank { it.audioUrl } }.orEmpty() }
+        // Older entries only store a show and the remembered episode title: still searchable.
+        val episodeTitle = (current?.title ?: item.episode).trim()
+        val query = "${item.name} $episodeTitle".trim()
+        val want = episodeTitle.lowercase().filter { it.isLetterOrDigit() }
+        fun matches(title: String): Boolean {
+            if (want.isEmpty()) return true
+            val actual = title.lowercase().filter { it.isLetterOrDigit() }
+            return actual.isNotEmpty() && (actual.contains(want) || want.contains(actual))
+        }
+
+        // The player is already playing this very episode: there is nothing to start.
+        if (want.isNotEmpty() && isPlayingTitle(context, pkg) { matches(it) }) {
+            PodcastPlayback.setActive(context, item.id)
+            return "SUCCESS episode: $episodeTitle (already playing)"
+        }
+
+        val canOpenFromBackground = android.provider.Settings.canDrawOverlays(context)
+        if (!canOpenFromBackground) {
+            AppLogger.log("Action", "'Display over other apps' is off: Android blocks opening $pkg from the background")
+        }
         try {
             val sm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as android.media.session.MediaSessionManager
-            sm.getActiveSessions(MediaListenerService.getComponentName(context))
-                .firstOrNull { it.packageName == pkg }?.transportControls?.stop()
+            val sessions = sm.getActiveSessions(MediaListenerService.getComponentName(context))
+            // A song from another player must not keep playing under the podcast.
+            sessions.filter {
+                it.packageName != pkg && it.packageName != context.packageName &&
+                    !MediaMenuConfig.isIgnored(context, it.packageName) &&
+                    it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+            }.forEach {
+                AppLogger.log("Action", "Pausing ${it.packageName} before the podcast")
+                it.transportControls.pause()
+            }
+            sessions.firstOrNull { it.packageName == pkg }?.transportControls?.stop()
             kotlinx.coroutines.delay(500)
         } catch (e: Exception) {
             AppLogger.logError("Action", "stop before podcast", e)
         }
 
-        val episodes = PodcastFeed.decodeEpisodes(item.podcastEpisodes)
-        val current = episodes.getOrNull(item.podcastIndex)
-        val episodeUrl = item.podcastCurrentUrl.ifBlank { current?.let { it.link.ifBlank { it.audioUrl } }.orEmpty() }
-
-        // Compatibility for podcast entries saved by older versions that only stored a show URL
-        // and a remembered episode title, with no RSS queue yet.
-        if (episodes.isEmpty() && item.episode.isNotBlank()) {
-            val before = currentTitle(context, pkg)
-            val legacySearch = TestEngine.playFromSearch(context, pkg, "${item.name} ${item.episode}")
-            val want = item.episode.lowercase().filter { it.isLetterOrDigit() }
-            if (legacySearch.startsWith("SUCCESS") && verified(context, pkg, before) { title ->
-                    val actual = title.lowercase().filter { it.isLetterOrDigit() }
-                    actual.contains(want) || want.contains(actual)
-                }) return "SUCCESS episode: ${item.episode}"
-        }
-        if (episodeUrl.isNotBlank()) {
-            // On an already-running player, prefer the standard Android MediaSession URI command.
-            // It can advance playback without needing to launch an Activity from the background.
-            if (current != null) {
-                val before = currentTitle(context, pkg)
-                val viaSession = TestEngine.playFromUri(context, pkg, episodeUrl)
-                val wanted = current.title.lowercase().filter { it.isLetterOrDigit() }
-                if (viaSession.startsWith("SUCCESS") && verified(context, pkg, before) { title ->
-                        val actual = title.lowercase().filter { it.isLetterOrDigit() }
-                        actual.contains(wanted) || wanted.contains(actual)
-                    }) {
-                    PodcastPlayback.setActive(context, item.id)
-                    return "SUCCESS episode: ${current.title} (player session)"
-                }
-                if (viaSession.startsWith("SUCCESS")) AppLogger.log("Action", "Podcast URI command was sent but the player did not confirm ${current.title}")
+        val before = currentTitle(context, pkg)
+        /** Waits for the player itself to show the episode. A command that was sent is not proof it worked. */
+        suspend fun confirmed(): Boolean {
+            repeat(12) {
+                kotlinx.coroutines.delay(300)
+                val t = currentTitle(context, pkg) ?: return@repeat
+                if (matches(t) && (t != before || isPlayingTitle(context, pkg) { matches(it) })) return true
             }
+            return false
+        }
 
-            val direct = openPodcastUrl(context, pkg, episodeUrl)
-            if (direct.startsWith("SUCCESS")) {
+        // The same ladder as music. The first two need an already running player, the browser connection
+        // wakes it up, and opening a link is last because Android blocks that from the background (it still
+        // reports "sent"), which is why a podcast started from the watch used to do nothing.
+        var last = "FAIL: no episode link or name to play"
+        for (label in listOf("SESSION URI", "SESSION SEARCH", "BROWSER SEARCH", "OPEN LINK")) {
+            val r = when (label) {
+                "SESSION URI" -> if (episodeUrl.isBlank()) continue else TestEngine.playFromUri(context, pkg, episodeUrl)
+                "SESSION SEARCH" -> if (query.isBlank()) continue else TestEngine.playFromSearch(context, pkg, query)
+                "BROWSER SEARCH" -> if (query.isBlank()) continue else TestEngine.connectMediaBrowserAndPlay(context, pkg, episodeUrl, query)
+                else -> if (episodeUrl.isBlank()) continue else openPodcastUrl(context, pkg, episodeUrl)
+            }
+            AppLogger.log("Action", "Podcast $label: ${r.take(120)}")
+            if (!r.startsWith("SUCCESS")) { last = r; continue }
+            if (confirmed()) {
                 PodcastPlayback.setActive(context, item.id)
-                return "SUCCESS episode: ${current?.title ?: item.episode}"
+                return "SUCCESS via $label: $episodeTitle"
             }
-            AppLogger.log("Action", "Podcast deep link was not handled by $pkg: $direct")
+            last = "FAIL: $label was sent but $pkg did not start the episode"
         }
 
-        if (current != null) {
-            // Some players can find podcast episodes through MediaSession search even when an
-            // RSS episode URL is not a native deep link. Verify the title before trusting it.
-            val before = currentTitle(context, pkg)
-            val search = TestEngine.playFromSearch(context, pkg, "${item.name} ${current.title}")
-            val want = current.title.lowercase().filter { it.isLetterOrDigit() }
-            if (search.startsWith("SUCCESS") && verified(context, pkg, before) { title ->
-                    val actual = title.lowercase().filter { it.isLetterOrDigit() }
-                    actual.contains(want) || want.contains(actual)
-                }) {
-                PodcastPlayback.setActive(context, item.id)
-                return "SUCCESS episode: ${current.title}"
-            }
-        }
-
-        // Last resort: hand the feed's episode page/audio URL to Android's normal app chooser.
+        // Nothing was confirmed by the player. Hand the link to Android's normal app chooser as a last try.
         val fallbackUrl = episodeUrl.ifBlank { current?.audioUrl.orEmpty() }.ifBlank { item.value }
-        val opened = if (fallbackUrl.isNotBlank()) openPodcastUrl(context, null, fallbackUrl) else "FAIL: no episode link was available"
-        if (opened.startsWith("SUCCESS")) PodcastPlayback.setActive(context, item.id)
-        return opened
+        if (fallbackUrl.isNotBlank()) {
+            val opened = openPodcastUrl(context, null, fallbackUrl)
+            if (opened.startsWith("SUCCESS") && !canOpenFromBackground) {
+                return "FAIL: Android blocked opening the episode. Turn on 'Display over other apps' for this app."
+            }
+            if (opened.startsWith("SUCCESS")) {
+                PodcastPlayback.setActive(context, item.id)
+                return "SUCCESS: opened the episode link; the player did not confirm it ($last)"
+            }
+        }
+        return last
     }
+
+    /** True when [pkg] is playing right now and its title passes [ok]. */
+    private fun isPlayingTitle(context: Context, pkg: String, ok: (String) -> Boolean): Boolean = try {
+        val sm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as android.media.session.MediaSessionManager
+        val c = sm.getActiveSessions(MediaListenerService.getComponentName(context)).firstOrNull { it.packageName == pkg }
+        val title = c?.metadata?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE)
+        c?.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING && title != null && ok(title)
+    } catch (e: Exception) { false }
 
     private fun openPodcastUrl(context: Context, pkg: String?, url: String): String {
         return try {

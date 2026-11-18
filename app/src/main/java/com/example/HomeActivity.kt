@@ -936,6 +936,25 @@ fun SetupScreen(onBack: () -> Unit) {
                         )
                     }
                     "ignore" -> {
+                        // Apps that have a media session right now: one tap puts them on the ignore list.
+                        val seen = MediaMenuState.seenPlayers.collectAsState().value.filter { it !in ignored }
+                        Text(
+                            "The watch never shows or controls the media of apps on this list.",
+                            color = NColors.Dim, fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
+                        )
+                        if (seen.isNotEmpty()) {
+                            SSection("Playing now")
+                            SGroup(*seen.map { pkg ->
+                                @Composable {
+                                    SRow("Ignore " + (launchable.firstOrNull { it.packageName == pkg }?.label ?: pkg), Icons.Filled.Block, onClick = {
+                                        ignored = ignored + pkg
+                                        MediaMenuConfig.setIgnoredApps(context, ignored)
+                                        MediaMenuService.instance?.reattachObservers()
+                                    }, chevron = false)
+                                }
+                            }.toTypedArray())
+                            SSection("Ignored")
+                        }
                         val rows = ignored.map { pkg ->
                             @Composable {
                                 SRow(launchable.firstOrNull { it.packageName == pkg }?.label ?: pkg, onClick = {

@@ -839,7 +839,7 @@ object WatchApp {
         }
         try {
             val msm = app.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-            val list = msm.getActiveSessions(MediaListenerService.getComponentName(app))
+            val list = msm.getActiveSessions(MediaListenerService.getComponentName(app)).filter { !MediaMenuConfig.isIgnored(app, it.packageName) }
             val pkg = MediaMenuConfig.targetPackage(app)
             val c = list.firstOrNull { it.packageName == pkg } ?: list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: return
             val dur = c.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
@@ -970,7 +970,7 @@ object WatchApp {
         }
         try {
             val msm = app.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-            val list = msm.getActiveSessions(MediaListenerService.getComponentName(app))
+            val list = msm.getActiveSessions(MediaListenerService.getComponentName(app)).filter { !MediaMenuConfig.isIgnored(app, it.packageName) }
             val pkg = MediaMenuConfig.targetPackage(app)
             val c: MediaController = list.firstOrNull { it.packageName == pkg }
                 ?: list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: return
@@ -1006,7 +1006,10 @@ object WatchApp {
         rememberWatchSelection(index)
         // the same song or episode is already loaded in the player: only open the watch's player, do not restart it
         val state = activeState()
-        if (current == index && currentMode == mode && state != null) {
+        // For a podcast, any media session is not enough: the player must really show this show's episode,
+        // otherwise a second tap on a podcast that never started would only open the watch's player page.
+        val loadedHere = state != null && (mode != 1 || podcastIsLoaded(item))
+        if (current == index && currentMode == mode && loadedHere) {
             playing = state == PlaybackState.STATE_PLAYING
             enqueueFirst(listOf(byteArrayOf('N'.code.toByte(), index.toByte(), if (playing) 1 else 0)))
             handler.postDelayed({ sendProgress() }, 300)
@@ -1019,14 +1022,31 @@ object WatchApp {
         handler.postDelayed({ sendProgress() }, 1200)
         ui.launch {
             val r = ActionRunner.run(app, g, item)
-            AppLogger.log("WatchApp", "play ${item.name}: ${r.take(80)}")
+            AppLogger.log("WatchApp", "play ${item.name}: ${r.take(120)}")
+            if (r.startsWith("SUCCESS")) {
+                WatchAppState.status.value = "Playing ${item.name.take(30)}"
+            } else {
+                // let the next tap try again instead of treating the item as loaded, and show why on the phone
+                if (current == index && currentMode == mode) current = -1
+                WatchAppState.status.value = r.take(100)
+            }
         }
+    }
+
+    /** True when the live player shows the episode this podcast row is on. */
+    private fun podcastIsLoaded(item: MenuItem): Boolean {
+        val show = freshShow(item)
+        val episode = PodcastFeed.decodeEpisodes(show.podcastEpisodes).getOrNull(show.podcastIndex)?.title ?: show.episode
+        val live = MediaMenuService.instance?.watchAppMediaSnapshot()?.title ?: return false
+        val want = episode.lowercase().filter { it.isLetterOrDigit() }
+        val actual = live.lowercase().filter { it.isLetterOrDigit() }
+        return want.isNotEmpty() && actual.isNotEmpty() && (actual.contains(want) || want.contains(actual))
     }
 
     /** The playback state of the media session that carries the music (playing, paused, buffering), or null. */
     private fun activeState(): Int? = try {
         val msm = app.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
-        val list = msm.getActiveSessions(MediaListenerService.getComponentName(app))
+        val list = msm.getActiveSessions(MediaListenerService.getComponentName(app)).filter { !MediaMenuConfig.isIgnored(app, it.packageName) }
         val pkg = MediaMenuConfig.targetPackage(app)
         val c = list.firstOrNull { it.packageName == pkg } ?: list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
         val st = c?.playbackState?.state
@@ -1034,7 +1054,13 @@ object WatchApp {
     } catch (e: Exception) { null }
 
     private fun mediaKey(code: Int, name: String) {
-        val pkg = MediaMenuConfig.targetPackage(app)
+        // the key goes to the player that the watch controls, never to an app on the ignore list
+        val preferred = MediaMenuConfig.targetPackage(app)
+        val pkg = try {
+            val msm = app.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+            val list = msm.getActiveSessions(MediaListenerService.getComponentName(app)).filter { !MediaMenuConfig.isIgnored(app, it.packageName) }
+            (list.firstOrNull { it.packageName == preferred } ?: list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING })?.packageName ?: preferred
+        } catch (e: Exception) { preferred }
         val r = TestEngine.sendMediaKeySession(app, pkg, code, name)
         if (!r.startsWith("SUCCESS")) TestEngine.sendMediaKeyAudioManager(app, code, name)
     }

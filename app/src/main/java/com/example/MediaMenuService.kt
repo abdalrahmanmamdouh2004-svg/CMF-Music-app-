@@ -120,7 +120,12 @@ object MediaMenuConfig {
     fun ignoredApps(c: Context): Set<String> =
         (p(c).getString("ignored_apps", DEFAULT_IGNORED) ?: DEFAULT_IGNORED).split(",").map { it.trim() }
             .filter { it.isNotEmpty() && it !in OLD_DEFAULTS }.toSet()
-    fun setIgnoredApps(c: Context, v: Set<String>) = p(c).edit().putString("ignored_apps", v.joinToString(",")).apply()
+    /** Saved at once (commit, not apply) so the list survives the app being closed right after a change. */
+    fun setIgnoredApps(c: Context, v: Set<String>) {
+        p(c).edit().putString("ignored_apps", v.map { it.trim() }.filter { it.isNotEmpty() }.distinct().joinToString(",")).commit()
+    }
+    /** True for an app on the ignore list: the watch never reads or controls its media. */
+    fun isIgnored(c: Context, pkg: String): Boolean = pkg in ignoredApps(c)
 
     // Kept so the lab screen still compiles.
     fun passcodeText(c: Context): String = enterText(c)
@@ -1079,7 +1084,7 @@ class MediaMenuService : Service() {
 
     private fun allSessions(): List<MediaController> = try {
         (getSystemService(Context.MEDIA_SESSION_SERVICE) as android.media.session.MediaSessionManager)
-            .getActiveSessions(MediaListenerService.getComponentName(this)).filter { it.packageName != packageName }
+            .getActiveSessions(MediaListenerService.getComponentName(this)).filter { it.packageName != packageName && !MediaMenuConfig.isIgnored(this, it.packageName) }
     } catch (e: Exception) { emptyList() }
 
     private fun activePodcastItem(): MenuItem? {
