@@ -36,7 +36,7 @@ Get these from the [Releases](../../releases) page:
 
 Before installing Watch Music, you need to patch your watch using the FMC Tool and install the Uploader.
 
-1. Open the [FMC Tool website](YOUR_FMC_TOOL_LINK).
+1. Open the [FMC Tool website](https://fmc.tools/firmware).
 2. Follow the instructions to patch your **CMF Watch Pro 2**.
 3. Install the **app loader** on your watch.
 4. Once both steps are complete, you can continue with the [Installation](#installation) instructions below.
