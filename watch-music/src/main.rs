@@ -163,7 +163,12 @@ mod device {
             let r = screens::leave(b, s).and_then(|_| match kind {
                 Kind::Wait => screens::wait(b, &mut flush, m.mode, m.empty, *page),
                 Kind::Home => screens::home(b, &mut flush, m.home_flags, *menu_anchor),
-                Kind::Menu => screens::menu(b, &mut flush, m, *page, *menu_anchor),
+                Kind::Menu => {
+                    // The list always starts in its natural order (Back, then the songs from the first). Starting it
+                    // at the row last chosen put every row before it, and the Back arrow, at the end of the list.
+                    *menu_anchor = 0;
+                    screens::menu(b, &mut flush, m, *page, 0)
+                }
                 Kind::Player => screens::player(b, &mut flush, m, text, *page),
             });
             if let Ok(next) = r {
