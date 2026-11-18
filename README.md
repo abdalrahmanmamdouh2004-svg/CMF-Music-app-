@@ -32,7 +32,7 @@ Get these from the [Releases](../../releases) page:
 - An Android phone.
 - **Chrome or Edge** on a computer (or Android Chrome) – the install page uses Web Bluetooth.
 
-##Installation
+## Installation
 1. Download the required files
 Download both files:
 - watch-sideload.html — the watch installation page.
