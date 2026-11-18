@@ -59,8 +59,3 @@ To update, repeat steps 3–6 with the new `.wp2app`. To remove the app, use the
 - Charge the watch before you start and do not interrupt an install.
 - This software is provided "as is", without warranty of any kind. The authors are not responsible for any damage or data loss.
 - Use it only on your own devices.
-
-## Credits and licence
-
-- The phone app and install page use the Nothing-style fonts NDot 55 and NType 82. Check their licence before you redistribute them.
-- Licence: *add your licence here (for example MIT) and a `LICENSE` file.*
