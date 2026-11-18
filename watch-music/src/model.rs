@@ -209,6 +209,26 @@ impl Model {
         if t.has_q { t.q } else { [t.c1; 4] }
     }
 
+    /// A cheap hash of what the list screen shows (mode, count, titles, artists). When the phone sends the same list
+    /// again, the screen is not rebuilt.
+    pub fn fingerprint(&self) -> u32 {
+        fn put(h: u32, b: u8) -> u32 {
+            (h ^ b as u32).wrapping_mul(16_777_619)
+        }
+        let mut h = put(put(2_166_136_261, self.mode), self.count);
+        for t in &self.tracks[..self.count as usize] {
+            for &c in &t.title[..t.tlen as usize] {
+                h = put(h, c);
+            }
+            h = put(h, 0);
+            for &c in &t.artist[..t.alen as usize] {
+                h = put(h, c);
+            }
+            h = put(h, 1);
+        }
+        h
+    }
+
     /// Applies one phone message.
     pub fn apply(&mut self, m: &[u8]) -> Effect {
         let mut fx = Effect::default();
@@ -831,5 +851,20 @@ mod tests {
         assert_eq!(m.elapsed(5000), 10);
         assert_eq!(permille(50, 100), 500);
         assert_eq!(permille(5, 0), 0);
+    }
+
+    #[test]
+    fn fingerprint_changes_only_with_what_the_list_shows() {
+        let mut m = Model::new();
+        m.apply(&[b'C', 2, 1]);
+        m.apply(&[b'T', 0, 2, 1, b'a', 1, b'x', 1, b'b', 1, b'y']);
+        let f = m.fingerprint();
+        m.apply(&[b'C', 2, 1]);
+        m.apply(&[b'T', 0, 2, 1, b'a', 1, b'x', 1, b'b', 1, b'y']);
+        assert_eq!(m.fingerprint(), f);
+        m.apply(&[b'K', 0, 1, 1, 0, 2, 0]);
+        assert_eq!(m.fingerprint(), f);
+        m.apply(&[b'T', 1, 1, 1, b'c', 1, b'y']);
+        assert_ne!(m.fingerprint(), f);
     }
 }

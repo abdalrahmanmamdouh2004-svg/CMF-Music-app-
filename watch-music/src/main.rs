@@ -26,10 +26,16 @@ mod device {
     cmf_wp2_app::app_features!(cmf_wp2_app::PAGE);
 
     const CLICKED: i16 = 7;
-    /// how soon the hello is sent again while the phone has not answered (it used to wait 2 s per try)
+    /// how soon the hello is sent again while the phone has not answered; each try waits twice as long, up to the max
+    /// (a steady 0.4 s flood made the phone answer every copy, and every answer rebuilt the screen)
     const HELLO_MS: u32 = 400;
+    const HELLO_MAX_MS: u32 = 2000;
+    /// the phone can open or close a screen by itself (a lone category, the media controls) at most this often
+    const AUTO_GAP_MS: u32 = 4000;
     /// how long a restore may take before the watch asks the phone for it again
     const RESUME_MS: u32 = 2500;
+    /// taps on the start screen's rows are ignored this long after it appears
+    const TAP_GUARD_MS: u32 = 600;
     /// the player looks at the clock this often while the song is paused
     const IDLE_MS: u32 = 5000;
     /// the volume stays on the crown this long after the last touch or turn
@@ -80,6 +86,10 @@ mod device {
         next_hello: u32,
         /// when to ask again for a restore that has not arrived (0 = none pending)
         resume_at: u32,
+        /// a tap on a start-screen row is ignored until then (a second tap on Back must not land on a row)
+        tap_guard: u32,
+        /// the phone has answered the last start-screen hello with its catalog
+        got_catalog: bool,
         /// the volume is on the crown until this time (`None`: it is not)
         vol_until: Option<u32>,
         quiet_until: u32,
@@ -104,6 +114,14 @@ mod device {
         resume_player: Option<u8>,
         /// true only until the first category catalog is received for a fresh app launch
         auto_pick_pending: bool,
+        /// when the phone last moved the watch to another screen by itself (`None`: not yet)
+        auto_at: Option<u32>,
+        /// how many hellos went out since the last answer (the gap between them grows)
+        hello_tries: u8,
+        /// what the screen on show was built from: the category flags, the list, and whether Wait said "nothing"
+        home_built: u8,
+        menu_fp: u32,
+        wait_empty: bool,
     }
 
     impl App {
@@ -133,6 +151,9 @@ mod device {
             self.pending_focus_row = -1;
             self.pending_focus_handle = 0;
             self.focus_accept_at = self.api.now().wrapping_add(FOCUS_REBUILD_GUARD_MS);
+            if kind == Kind::Home {
+                self.tap_guard = self.api.now().wrapping_add(TAP_GUARD_MS);
+            }
             self.quiet_until = self.api.now().wrapping_add(QUIET_MS);
             let mut clock = [0u8; 5];
             let min = self.clock(&mut clock);
@@ -149,6 +170,9 @@ mod device {
                 *s = next;
                 let _ = self.flush();
             }
+            self.home_built = self.m.home_flags & 0x0F;
+            self.menu_fp = self.m.fingerprint();
+            self.wait_empty = self.m.empty;
             if kind == Kind::Player {
                 self.last_min = min;
                 self.refresh(true);
@@ -207,7 +231,15 @@ mod device {
                 if player_resume { 1 } else { 0 },
             ]);
             self.heard = false;
-            self.next_hello = self.api.now().wrapping_add(HELLO_MS);
+            let gap = (HELLO_MS << self.hello_tries.min(3)).min(HELLO_MAX_MS);
+            self.hello_tries = self.hello_tries.saturating_add(1);
+            self.next_hello = self.api.now().wrapping_add(gap);
+        }
+
+        /// A new question to the phone (not a retry): the gaps start short again.
+        fn hello_now(&mut self) {
+            self.hello_tries = 0;
+            self.hello();
         }
 
         /// The start screen's choice: the list of that mode, the saved one at once for music.
@@ -225,7 +257,7 @@ mod device {
                 }
             }
             self.go(if self.m.count > 0 { Kind::Menu } else { Kind::Wait });
-            self.hello();
+            self.hello_now();
         }
 
         /// Back to the start screen.
@@ -237,36 +269,51 @@ mod device {
             self.auto_pick_pending = false;
             self.menu_anchor = 0;
             self.m.pick(MODE_NONE);
+            self.got_catalog = false;
             self.go(Kind::Home);
-            self.hello();
+            self.hello_now();
         }
 
-        /// The phone has refreshed the set of categories with real content.
+        /// The phone sent the set of categories with real content.
+        /// The same set again changes nothing on screen, so nothing is rebuilt: a rebuild throws the list back to the
+        /// top, blanks the icons for a moment and moves the Back arrow (that was the twitching). The phone moves the
+        /// watch by itself only until the first choice, and not more often than `AUTO_GAP_MS`; the controls stay open
+        /// while they are open, because the media session comes and goes with every pause (that was the flicker).
         fn home_catalog(&mut self, refreshed: bool) {
-            if refreshed && self.s.kind == Kind::Home {
-                self.auto_pick_pending = true;
-                self.menu_anchor = 0;
-            }
+            self.got_catalog = true;
             let flags = self.m.home_flags;
+            let shown = flags & 0x0F;
+            let now = self.api.now();
+            let calm = self.auto_at.map_or(true, |t| now.wrapping_sub(t) >= AUTO_GAP_MS);
             if self.s.kind == Kind::Home {
                 // Cold launch while something plays: straight to its controls, no start screen in between.
-                if flags & 0x10 != 0 && !refreshed && flags & 0x08 != 0 {
+                if flags & 0x10 != 0 && !refreshed && flags & 0x08 != 0 && calm {
                     self.auto_pick_pending = false;
+                    self.auto_at = Some(now);
                     self.return_to_controls();
                     return;
                 }
-                if self.auto_pick_pending {
+                if shown == self.home_built {
+                    return;
+                }
+                self.menu_anchor = 0;
+                if refreshed {
+                    self.auto_pick_pending = true;
+                }
+                if self.auto_pick_pending && calm {
                     let mut only = MODE_NONE;
                     let mut count = 0usize;
                     for (mode, bit) in [(MODE_MUSIC, 0x01), (MODE_PODCAST, 0x02), (MODE_CUSTOM, 0x04)] {
                         if flags & bit != 0 { only = mode; count += 1; }
                     }
                     if count == 1 {
+                        self.auto_at = Some(now);
                         self.pick(only);
                         return;
                     }
                     if count == 0 && flags & 0x08 != 0 {
                         self.auto_pick_pending = false;
+                        self.auto_at = Some(now);
                         self.return_to_controls();
                         return;
                     }
@@ -278,15 +325,17 @@ mod device {
                 MODE_MUSIC => flags & 0x01 != 0,
                 MODE_PODCAST => flags & 0x02 != 0,
                 MODE_CUSTOM => flags & 0x04 != 0,
-                MODE_EXTERNAL => flags & 0x08 != 0,
+                // The controls stay while they are open. Back leaves them.
+                MODE_EXTERNAL => true,
                 _ => true,
             };
             if !available {
                 self.m.pick(MODE_NONE);
                 self.menu_anchor = 0;
-                self.auto_pick_pending = true;
+                // Home stays: no automatic jump into another screen from here.
+                self.auto_pick_pending = false;
                 self.go(Kind::Home);
-                self.hello();
+                self.hello_now();
             }
         }
 
@@ -303,7 +352,7 @@ mod device {
             self.m.dur = 0;
             self.go(Kind::Player);
             // Mode 2 uses the existing hello/retry handshake, so a dropped request is retried.
-            self.hello();
+            self.hello_now();
         }
 
         // ---- the volume on the crown ----
@@ -466,6 +515,11 @@ mod device {
                 }
                 return;
             }
+            // A live-media update that was already on its way when the user pressed Back must not pull the
+            // model back into Control media (it only counts while that mode is the one being shown).
+            if msg.first() == Some(&b'X') && self.m.mode != MODE_EXTERNAL {
+                return;
+            }
             let refreshed = msg.first() == Some(&b'R');
             let level = self.m.level;
             self.quiet_until = self.api.now().wrapping_add(QUIET_MS);
@@ -504,11 +558,14 @@ mod device {
                     } else if matches!(self.s.kind, Kind::Home | Kind::Wait | Kind::Menu) {
                         self.go(Kind::Menu);
                     }
-                } else if matches!(self.s.kind, Kind::Wait | Kind::Menu) {
+                } else if self.s.kind == Kind::Wait
+                    || (self.s.kind == Kind::Menu && self.m.fingerprint() != self.menu_fp)
+                {
+                    // The phone sends the whole list again after every hello; the same list is not rebuilt.
                     self.go(Kind::Menu);
                 }
             }
-            if fx.list && self.m.count == 0 && self.m.empty && self.s.kind == Kind::Wait {
+            if fx.list && self.m.count == 0 && self.m.empty && self.s.kind == Kind::Wait && !self.wait_empty {
                 self.go(Kind::Wait); // the same screen again, now saying that there is nothing to show
             }
             if msg.first() == Some(&b'V') && self.vol_until.is_some() && self.s.kind == Kind::Player {
@@ -555,6 +612,9 @@ mod device {
                 return;
             }
             if self.s.kind == Kind::Home {
+                if !after(self.api.now(), self.tap_guard) {
+                    return;
+                }
                 if let Some(slot) = self.s.rows.iter().take(self.s.home_count as usize).position(|r| r.0 == h) {
                     self.motor.play(TICK);
                     match self.s.home_modes[slot] {
@@ -643,6 +703,8 @@ mod device {
             tide_next: api.now(),
             next_hello: api.now(),
             resume_at: 0,
+            tap_guard: 0,
+            got_catalog: false,
             vol_until: None,
             quiet_until: 0,
             last_tick: 0,
@@ -657,6 +719,11 @@ mod device {
             fresh_launch: true,
             resume_player: None,
             auto_pick_pending: true,
+            auto_at: None,
+            hello_tries: 0,
+            home_built: 0xFF,
+            menu_fp: 0,
+            wait_empty: false,
         };
         // A new app instance starts from Home even if the loader reuses the process and static allocation.
         // Reset field-by-field: constructing a temporary Model here would put the full 50-track table
@@ -687,7 +754,7 @@ mod device {
             }
             app.motor.update();
             // wake for the motor, the next second of the song, the clock, the volume, or the next hello
-            let mut wait = if app.heard { u32::MAX } else { HELLO_MS };
+            let mut wait = if app.heard { u32::MAX } else { app.next_hello.wrapping_sub(now).min(HELLO_MAX_MS) };
             if app.resume_at != 0 {
                 wait = wait.min(app.resume_at.wrapping_sub(now).min(RESUME_MS));
             }
@@ -737,12 +804,14 @@ mod device {
                     app.paused = true;
                     app.motor.off();
                     app.heard = false;
+                    app.hello_tries = 0;
                     app.next_hello = api.now();
                 }
                 RESUME => {
                     app.paused = false;
                     app.tide_next = api.now();
                     app.heard = false;
+                    app.hello_tries = 0;
                     app.next_hello = api.now();
                 }
                 CROWN => app.crown(e.delta),
@@ -756,9 +825,15 @@ mod device {
                 }
                 MESSAGE => {
                     app.heard = true;
+                    app.hello_tries = 0;
                     app.fresh_launch = false;
                     while let Some(m) = api.recv(&mut msg) {
                         app.phone(m);
+                    }
+                    // any message counts as an answer, except while the start screen still waits for its catalog:
+                    // the phone has to hear the hello that tells it the watch left Control media
+                    if app.s.kind == Kind::Home && !app.got_catalog {
+                        app.heard = false;
                     }
                 }
                 _ => {}
