@@ -33,26 +33,46 @@ Get these from the [Releases](../../releases) page:
 - **Chrome or Edge** on a computer (or Android Chrome) – the install page uses Web Bluetooth.
 
 ## Installation
-1. Download the required files
+
+### 1. Download the required files
+
 Download both files:
-- watch-sideload.html — the watch installation page.
-- watch-music.wp2app — the Watch Music app for your watch.
-2. Install Watch Music on your watch
-1. Open watch-sideload.html in Chrome or Microsoft Edge.
-2. Tick the box to acknowledge the risks, then press Connect watch.
-3. Select your CMF Watch Pro 2 from the device list.
-4. If the watch displays "Paired", leave it as it is.
-5. Drag and drop watch-music.wp2app onto the page.
-6. Press Install and keep your watch awake and nearby until installation is complete.
-3. Install the phone app
-1. Download WatchMenu.apk and install it on your Android phone.
+
+- `watch-sideload.html` — the watch installation page.
+- `watch-music.wp2app` — the Watch Music app for your watch.
+
+### 2. Install Watch Music on your watch
+
+1. Open `watch-sideload.html` in **Google Chrome** or **Microsoft Edge**.
+2. Tick the risk acknowledgment box and press **Connect watch**.
+3. Select your **CMF Watch Pro 2** from the device list.
+4. If the watch displays **"Paired"**, leave it as it is.
+5. Drag and drop `watch-music.wp2app` onto the page.
+6. Press **Install** and keep your watch awake and nearby until installation is complete.
+
+### 3. Install the phone app
+
+1. Download `WatchMenu.apk` and install it on your Android phone.
 2. Allow installation from unknown sources if Android asks.
-3. Open the app and grant the requested permissions, including Notification Access.
-Important: Watch Music cannot be used alongside the Nothing X app. Make sure the watch is disconnected from Nothing X before setting it up.
-4. Add your music and podcasts
+3. Open the app and grant the requested permissions, including **Notification Access**.
+
+> **Important:** Watch Music cannot be used alongside the Nothing X app. Make sure the watch is disconnected from Nothing X before setting it up.
+
+### 4. Add your music and podcasts
+
 Open the phone app and pair your watch.
-- Music: Copy a link to your favourite songs, or share an entire playlist with the app.
-- Podcasts: Copy and paste the share link of your favourite podcast into the app.
+
+- **Music:** Copy a link to your favourite songs or share an entire playlist with the app.
+- **Podcasts:** Copy the podcast's share link into the app, then choose the episode you want to listen to.
+
+Once your content is added, turn Bluetooth back on if you disabled it during installation. Open Watch Music on your watch and it should connect to the phone app.
+
+---
+
+## Updating or Removing Watch Music
+
+- **Update:** Repeat Step 2 using the new `watch-music.wp2app` file.
+- **Remove:** Open the sideloading page, connect your watch, and use the **Remove** button in the *On the watch* list.
 
 ## Troubleshooting
 
