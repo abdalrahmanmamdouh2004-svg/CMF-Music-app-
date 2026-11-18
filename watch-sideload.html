@@ -60,6 +60,7 @@ button.danger:hover:not(:disabled){background:var(--red)}
 .empty{color:var(--dim);font-size:14px;padding:6px 2px}
 .drop{display:block;border:1.5px dashed var(--line);border-radius:20px;padding:30px 14px;text-align:center;color:var(--dim);font:15px var(--mono);cursor:pointer;transition:border-color .15s,color .15s}
 .drop.over,.drop:hover{border-color:var(--red);color:var(--text)}
+.vh{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip:rect(0 0 0 0);pointer-events:none}
 .pick{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
 .pick .info{flex:1;min-width:160px;font:400 16px var(--dot)}
 .pick .info small{display:block;font:13px var(--mono);color:var(--dim);margin-top:4px}
@@ -112,8 +113,8 @@ footer b{font:400 13px var(--mono);color:#c9c9ce}
 
   <section id="installBox" hidden>
     <h2><em>03</em>Install</h2>
-    <label class="drop" id="drop" for="file">Drop a .wp2app file here, or tap to choose</label>
-    <input type="file" id="file" accept="*/*" hidden>
+    <label class="drop" id="drop" for="file" role="button" tabindex="0">Drop a .wp2app file here, or tap to choose</label>
+    <input type="file" id="file" class="vh">
     <div class="pick" id="pick" hidden>
       <div class="info"><span id="pkgName"></span><small id="pkgMeta"></small></div>
       <button class="primary" id="install">Install</button>
@@ -586,16 +587,26 @@ footer b{font:400 13px var(--mono);color:#c9c9ce}
   // ---- install ----
   function updateInstall() { $('install').disabled = !(session && pkgData) || busy; }
 
-  // Android file pickers sometimes hand over a file that arrayBuffer() can't open: try the other readers too.
+  // Android file pickers sometimes hand over a file that arrayBuffer() can't open: try every reader there is.
   async function readFile(file) {
     const tries = [
-      async () => new Uint8Array(await file.arrayBuffer()),
-      () => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(new Uint8Array(r.result)); r.onerror = () => no(r.error); r.readAsArrayBuffer(file); }),
-      async () => { const u = URL.createObjectURL(file); try { return new Uint8Array(await (await fetch(u)).arrayBuffer()); } finally { URL.revokeObjectURL(u); } },
+      ['arrayBuffer', async () => new Uint8Array(await file.arrayBuffer())],
+      ['FileReader', () => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(new Uint8Array(r.result)); r.onerror = () => no(r.error || new Error('FileReader error')); r.readAsArrayBuffer(file); })],
+      ['slice', async () => new Uint8Array(await file.slice(0, file.size).arrayBuffer())],
+      ['Response', async () => new Uint8Array(await new Response(file).arrayBuffer())],
+      ['stream', async () => {
+        const rd = file.stream().getReader(), parts = []; let n = 0;
+        for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); n += value.length; }
+        const out = new Uint8Array(n); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out;
+      }],
+      ['objectURL', async () => { const u = URL.createObjectURL(file); try { return new Uint8Array(await (await fetch(u)).arrayBuffer()); } finally { URL.revokeObjectURL(u); } }],
     ];
     let last;
-    for (const t of tries) { try { return await t(); } catch (e) { last = e; log('read failed: ' + (e && e.name)); } }
-    throw new Error('Cannot read that file. Copy it into the Downloads folder, then pick it from Downloads (not from Recent or a cloud app).');
+    for (const [name, t] of tries) {
+      try { const d = await t(); if (d && d.length) return d; last = new Error('empty read'); log('read ' + name + ': empty'); }
+      catch (e) { last = e; log('read ' + name + ' failed: ' + (e && (e.name || e.message))); }
+    }
+    throw new Error('Cannot read that file (' + ((last && (last.name || last.message)) || 'unknown') + '). Save it to the Downloads folder, then pick it from Downloads (not from Recent or a cloud app).');
   }
 
   async function choose(file) {
@@ -603,6 +614,7 @@ footer b{font:400 13px var(--mono);color:#c9c9ce}
     if (!file) return;
     try {
       const data = await readFile(file);
+      if (data[0] === 0x50 && data[1] === 0x4B) throw new Error('This is a ZIP file. Unzip it first and pick the .wp2app inside.');
       pkgInfo = WP2.parsePackage(data);
       pkgData = data;
       $('pkgName').textContent = pkgInfo.kind === 1 ? 'App Loader' : pkgInfo.name;
@@ -611,8 +623,17 @@ footer b{font:400 13px var(--mono);color:#c9c9ce}
     } catch (e) { say(e.message, 'err'); }
     updateInstall();
   }
-  $('file').addEventListener('change', (e) => choose(e.target.files[0]));
+  const fileInput = $('file');
+  const onPick = () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    choose(f).finally(() => { try { fileInput.value = ''; } catch (_) {} });
+  };
+  fileInput.addEventListener('change', onPick);
   const drop = $('drop');
+  const openPicker = (e) => { e.preventDefault(); try { fileInput.click(); } catch (err) { say('Cannot open the file picker: ' + err.message, 'err'); } };
+  drop.addEventListener('click', openPicker);
+  drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') openPicker(e); });
   ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
   ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
   drop.addEventListener('drop', (e) => choose(e.dataTransfer.files[0]));
